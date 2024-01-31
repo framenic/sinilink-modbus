@@ -1,0 +1,423 @@
+substitutions:
+  # Change this model to fit your particular one.
+  # You can find it in Home Assistant as the device diagnostic "Model Name".
+  model: "XY5008"
+  device_name: "xy5008-controller"
+  device_friendly_name: "sinilink-XY5008"
+  device_description: "Power Supply"
+  
+  # Model specific settings (Don't change these!)
+  XY5008_voltage_maximum: "50"
+  XY5008_voltage_accuracy: "2"
+  XY5008_voltage_multiplier: "0.01"
+  XY5008_current_maximum: "8"
+  XY5008_current_accuracy: "3"
+  XY5008_current_multiplier: "0.001"
+
+globals:
+   - id:   vin_undervoltage_theshold
+     type: float
+     restore_value: no
+     initial_value: '17'
+  
+esphome:
+  name: $device_name
+  friendly_name: $device_friendly_name
+  comment: $device_description
+  name_add_mac_suffix: false
+  project:
+    name: "sinilink.xy5008-controller"
+    version: "1.0.0"
+
+esp8266:
+  board: esp01_1m
+
+# Enable logging
+logger:
+  level: INFO
+  # Disable logging via UART, since we're using this for modbus communication
+  baud_rate: 0
+
+# Enable status LED
+status_led:
+  pin:
+    number: GPIO2
+    inverted: true
+
+web_server:
+  port: 80
+  local: true
+  log: false
+
+# Enable Home Assistant API
+api:
+#  encryption:
+#    key: !secret home_assistant_key
+  reboot_timeout: 0s
+  
+ota:
+  password: ""
+
+# Configure WiFi
+wifi:
+  networks:
+  - ssid: !secret wifi_home_ssid
+    password: !secret wifi_home_password    
+
+    
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "XY5008 Fallback Hotspot"
+    password: ""
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: ESP IP Address
+      id: ip_address
+      on_value:      
+        then:
+          - lambda: |-
+          
+  - platform: template
+    name: "Turn On Time"
+    lambda: |-
+      char buffer[16];
+      std::string ton_time;
+      std::snprintf(buffer, 16, "%02d:%02d:%02d" , (int)id(turnon_hours).state, (int)id(turnon_minutes).state, (int)id(turnon_seconds).state);
+      ton_time = buffer;
+      
+      return {ton_time};
+    update_interval: 1s
+          
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          char ip[18];
+          char *ptr =ip;
+                  
+          strncpy(ip,id(ip_address).state.c_str(),17);
+          ip[17]=0;
+          int ip1 = atoi(ptr);
+          ptr = strchr( ptr, '.');
+          if (ptr!=NULL) {
+            int ip2 = atoi(++ptr);
+            ptr = strchr( ptr, '.');
+            if (ptr!=NULL) {
+              int ip3 = atoi(++ptr);
+              ptr = strchr( ptr, '.');
+              if (ptr!=NULL) {
+                int ip4 = atoi(++ptr);
+                esphome::modbus_controller::ModbusController *controller = id(powersupply);
+                // create the payload
+                std::vector<uint16_t> wifi_data = { 0x3b3a, 2, 4, uint16_t((ip1 << 8) | ip2), uint16_t((ip3 << 8) | ip4) };
+                // Create a ModBUS command item with the wifi information as the payload
+                esphome::modbus_controller::ModbusCommandItem set_wifi_command =
+                      esphome::modbus_controller::ModbusCommandItem::create_write_multiple_command(controller, 0x30, 5, wifi_data);
+                // Submit the command to the send queue
+                powersupply->queue_command(set_wifi_command);
+              }
+            }
+          }
+          
+  - interval: 1s
+    then:
+      - lambda: |-
+          esphome::modbus_controller::ModbusController *controller = id(powersupply);
+          esphome::modbus_controller::ModbusCommandItem set_wifi_command =
+              esphome::modbus_controller::ModbusCommandItem::create_read_command(controller, esphome::modbus_controller::ModbusRegisterType::HOLDING, 0x30, 5);
+          // Submit the command to the send queue
+          powersupply->queue_command(set_wifi_command);
+          
+  - interval: 0.5s
+    then:
+      - lambda: |-
+          static int count = 0;
+          static int delay_count = 0;
+          static int uv_count = 0;
+                    
+          if ((id(output_switch).state) && (id(cutoff_current).state!=0) && (id(output_current).state < id(cutoff_current).state)){
+            if (count>=5) {
+              count = 0;
+              id(output_switch).turn_off();
+              id(out_relay).turn_off();
+            }
+            else count++;              
+          }
+          else count=0;
+          
+          if (id(input_voltage).state < id(vin_undervoltage_theshold)) { if (uv_count<4) uv_count++; }
+          else {
+             if (id(output_switch).state) id(out_relay).turn_on();
+             uv_count=0;
+          }
+             
+          if (uv_count >=4) {
+              id(out_relay).turn_off();
+          }    
+          
+          if (id(out_relay).state) {
+              if (id(output_switch).state) delay_count=0;
+              else delay_count++;
+          }
+          else delay_count=0;
+          
+          if (delay_count>=120*3) { 
+              id(out_relay).turn_off();
+              delay_count=0;
+          }    
+          
+captive_portal:
+
+uart:
+  id: mod_bus
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 115200
+  data_bits: 8
+  stop_bits: 1
+  parity: none
+
+modbus:
+ id: modbus1
+# send_wait_time: 1ms
+
+modbus_controller:
+  - id: powersupply
+    ## This address should be set to the "Address" value in the config menu
+    address: 0x01
+    modbus_id: modbus1
+    setup_priority: 600
+    update_interval: 1s
+    command_throttle: 1ms
+    
+
+sensor:
+  
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 2
+    name: "Output voltage"
+    device_class: voltage
+    state_class: measurement
+    unit_of_measurement: "V"
+    register_type: holding
+    value_type: U_WORD
+    accuracy_decimals: ${${model}_voltage_accuracy}
+    filters:
+      - multiply: ${${model}_voltage_multiplier}
+
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 3
+    name: "Output current"
+    id: output_current
+    device_class: current
+    state_class: measurement
+    unit_of_measurement: "A"
+    register_type: holding
+    value_type: U_WORD
+    accuracy_decimals: ${${model}_current_accuracy}
+    filters:
+      - multiply: ${${model}_current_multiplier}
+
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 4
+    name: "Output Power"
+    device_class: power
+    state_class: measurement
+    unit_of_measurement: "W"
+    register_type: holding
+    value_type: U_WORD
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 5
+    name: "Input voltage"
+    id: input_voltage
+    device_class: voltage
+    unit_of_measurement: "V"
+    register_type: holding
+    value_type: U_WORD
+    accuracy_decimals: ${${model}_voltage_accuracy}
+    #accuracy_decimals: 3
+    filters:
+    #  - multiply: ${${model}_voltage_multiplier}
+      - multiply: 0.01
+  
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 6
+    name: "Battery charge"
+    device_class: "energy_storage"
+    state_class: measurement
+    unit_of_measurement: "Ah"
+    icon: "mdi:battery-60"
+    register_type: holding
+    value_type: U_DWORD_R
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 8
+    name: "Battery energy"
+    device_class: "energy_storage"
+    state_class: measurement
+    unit_of_measurement: "Wh"
+    icon: "mdi:battery-60"
+    register_type: holding
+    value_type: U_DWORD_R
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 10
+    name: "turnon_hours"
+    id: turnon_hours
+    unit_of_measurement: "hours"
+    register_type: holding
+    value_type: U_WORD
+    internal: true
+  
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 11
+    name: "turnon_minutes"
+    id: turnon_minutes
+    unit_of_measurement: "minutes"
+    register_type: holding
+    value_type: U_WORD
+    internal: true
+  
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    address: 12
+    name: "turnon_seconds"
+    id: turnon_seconds
+    unit_of_measurement: "seconds"
+    register_type: holding
+    value_type: U_WORD
+    internal: true
+    
+  - platform: modbus_controller
+    name: "Temperature"
+    device_class: temperature
+    state_class: measurement
+    modbus_controller_id: powersupply
+    register_type: holding
+    address: 13
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    
+  - platform: modbus_controller
+    name: "Temperature external"
+    state_class: measurement
+    modbus_controller_id: powersupply
+    register_type: holding
+    address: 14
+    value_type: S_WORD
+    device_class: temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      
+  - platform: modbus_controller
+    name: "Host type"
+    state_class: measurement
+    modbus_controller_id: powersupply
+    register_type: holding
+    address: 48
+    value_type: U_WORD
+    internal: true
+       
+binary_sensor:
+ 
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    name: "Constant Voltage"
+    address: 17
+    register_type: holding
+    bitmask: 0x1
+    filters:
+      - invert:
+      
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    name: "Constant Current"
+    address: 17
+    register_type: holding
+    bitmask: 0x1 
+
+number:
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    name: "Set output voltage"
+    device_class: voltage
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    address: 0
+    value_type: U_WORD
+    min_value: 0
+    max_value: ${${model}_voltage_maximum}
+    step: ${${model}_voltage_multiplier}
+    lambda: !lambda return x * ${${model}_voltage_multiplier};
+    write_lambda: !lambda return x * (1/${${model}_voltage_multiplier});
+  
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    name: "Set output current"
+    device_class: current
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    address: 1
+    value_type: U_WORD
+    min_value: 0
+    max_value: ${${model}_current_maximum}
+    step: ${${model}_current_multiplier}
+    lambda: !lambda return x * ${${model}_current_multiplier};
+    write_lambda: !lambda return x * (1/${${model}_current_multiplier});
+    
+  - platform: template
+    name: "Under current cutoff (battery charge)"
+    id: cutoff_current
+    device_class: current
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: ${${model}_current_maximum}
+    step: ${${model}_current_multiplier}
+    optimistic: true
+    
+switch:
+  - platform: modbus_controller
+    modbus_controller_id: powersupply
+    name: "Output"
+    id: output_switch
+    address: 18
+    register_type: holding
+    bitmask: 0x1
+    entity_category: config
+   
+  - platform: gpio
+    id: out_relay
+    name: "Output relay"
+    pin:
+      number: GPIO4
+      inverted: false
