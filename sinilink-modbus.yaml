@@ -56,7 +56,8 @@ api:
   reboot_timeout: 0s
   
 ota:
-  password: ""
+  - platform: esphome
+    #password: !secret ota_password
 
 # Configure WiFi
 wifi:
